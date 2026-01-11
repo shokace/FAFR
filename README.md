@@ -31,8 +31,6 @@ cmake --build build
 
 ## Usage
 
-Top-level commands:
-
 ### `encode`
 Convert a WAV file into a `.fafr` file.
 
@@ -44,21 +42,11 @@ Convert a WAV file into a `.fafr` file.
 - `--hop H`: hop size in samples (default 1024)
 - `--fade-ms M`: fade in/out duration in milliseconds (default 20)
 
-Example (high level):
-```
-./fafr encode song.wav song.fafr
-```
-
 ### `decode`
 Reconstruct a WAV file from a `.fafr` file.
 
 ```
 ./fafr decode <input.fafr> <output.wav>
-```
-
-Example (high level):
-```
-./fafr decode song.fafr song.wav
 ```
 
 ## Notes and constraints
