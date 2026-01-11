@@ -6,8 +6,8 @@ This project is intentionally focused on a function-style representation of audi
 
 ## What it does
 
-- **Encode**: WAV -> `.fafr` (framewise Fourier coefficients)
-- **Decode**: `.fafr` -> WAV (overlap-add reconstruction)
+- **Encode**: `.wav` -> `.fafr` (framewise Fourier coefficients)
+- **Decode**: `.fafr` -> `.wav` (overlap-add reconstruction)
 
 ## How it works
 
