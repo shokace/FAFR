@@ -29,6 +29,19 @@ cmake -S . -B build
 cmake --build build
 ```
 
+### macOS component (scaffold)
+
+On macOS, CMake can build a `.component` bundle target (`fafr_component`) and install it
+to `~/Library/Audio/Plug-Ins/Components` by default:
+
+```
+cmake -S . -B build -DFAFR_BUILD_MACOS_COMPONENT=ON
+cmake --build build
+cmake --install build
+```
+
+You can override the install path with `-DFAFR_COMPONENT_INSTALL_DIR=...`.
+
 ## Usage
 
 ### `encode`

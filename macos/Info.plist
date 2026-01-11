@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>Fafr</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.fafr.codec</string>
+  <key>CFBundlePackageType</key>
+  <string>BNDL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>AudioComponents</key>
+  <array>
+    <dict>
+      <key>description</key>
+      <string>FAFR Audio Decoder (scaffold)</string>
+      <key>factoryFunction</key>
+      <string>FafrComponentFactory</string>
+      <key>manufacturer</key>
+      <string>FAFR</string>
+      <key>name</key>
+      <string>FAFR Decoder</string>
+      <key>type</key>
+      <string>acod</string>
+      <key>subtype</key>
+      <string>fafr</string>
+      <key>version</key>
+      <integer>1</integer>
+    </dict>
+  </array>
+</dict>
+</plist>
