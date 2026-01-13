@@ -25,12 +25,66 @@
       <string>FAFR</string>
       <key>name</key>
       <string>FAFR Decoder</string>
+      <key>sandboxSafe</key>
+      <integer>1</integer>
       <key>type</key>
-      <string>acod</string>
+      <string>adec</string>
       <key>subtype</key>
       <string>fafr</string>
       <key>version</key>
       <integer>1</integer>
+    </dict>
+    <dict>
+      <key>description</key>
+      <string>FAFR AudioFile Component</string>
+      <key>factoryFunction</key>
+      <string>FafrAudioFileComponentFactory</string>
+      <key>manufacturer</key>
+      <string>FAFR</string>
+      <key>name</key>
+      <string>FAFR AudioFile</string>
+      <key>sandboxSafe</key>
+      <integer>1</integer>
+      <key>type</key>
+      <string>afil</string>
+      <key>subtype</key>
+      <string>fafr</string>
+      <key>version</key>
+      <integer>1</integer>
+    </dict>
+  </array>
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>com.fafr.audio</string>
+      <key>UTTypeDescription</key>
+      <string>FAFR Audio File</string>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.audio</string>
+        <string>public.data</string>
+      </array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>fafr</string>
+        </array>
+      </dict>
+    </dict>
+  </array>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>FAFR Audio</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>com.fafr.audio</string>
+      </array>
     </dict>
   </array>
 </dict>

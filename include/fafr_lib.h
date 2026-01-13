@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 static constexpr uint32_t FAFR_MAGIC = 0x52464146; // "FAFR" little-endian
 static constexpr uint32_t FAFR_VERSION = 1;
@@ -26,9 +28,24 @@ struct FafrEncodeOptions {
   float fade_ms = 20.0f;
 };
 
+struct FafrDecodedAudio {
+  uint32_t sample_rate = 0;
+  uint16_t channels = 0;
+  uint64_t total_frames = 0;
+  std::vector<float> interleaved;
+};
+
 void fafr_encode_wav_to_fafr(const std::string& in_path,
                              const std::string& out_path,
                              const FafrEncodeOptions& opt);
 
 void fafr_decode_fafr_to_wav(const std::string& in_path,
                              const std::string& out_path);
+
+bool fafr_parse_header_bytes(const uint8_t* data, size_t size, FafrHeader* out_hdr);
+
+FafrDecodedAudio fafr_decode_fafr_bytes(const uint8_t* data, size_t size);
+
+FafrDecodedAudio fafr_decode_fafr_coeffs(const FafrHeader& hdr,
+                                         const uint8_t* coeff_bytes,
+                                         size_t coeff_size);

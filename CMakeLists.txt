@@ -26,6 +26,7 @@ if(APPLE)
   if(FAFR_BUILD_MACOS_COMPONENT)
     add_library(fafr_component MODULE
       macos/FafrComponent.cpp
+      macos/FafrAudioFileComponent.cpp
     )
     set_target_properties(fafr_component PROPERTIES
       BUNDLE TRUE
@@ -33,8 +34,13 @@ if(APPLE)
       OUTPUT_NAME "Fafr"
       MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/macos/Info.plist
     )
-    target_link_libraries(fafr_component PRIVATE fafr_lib "-framework AudioToolbox" "-framework CoreAudio")
+    target_link_libraries(fafr_component PRIVATE fafr_lib "-framework AudioToolbox" "-framework CoreAudio" "-framework CoreFoundation")
     target_include_directories(fafr_component PRIVATE include)
     install(TARGETS fafr_component DESTINATION ${FAFR_COMPONENT_INSTALL_DIR})
   endif()
+endif()
+
+if(APPLE)
+  add_executable(fafr_diag tools/fafr_diag.cpp)
+  target_link_libraries(fafr_diag PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
 endif()

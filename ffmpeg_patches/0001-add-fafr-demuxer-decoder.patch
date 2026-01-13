@@ -1,0 +1,476 @@
+--- a/libavcodec/codec_id.h
++++ b/libavcodec/codec_id.h
+@@ -451,6 +451,7 @@
+     AV_CODEC_ID_VMDAUDIO,
+     AV_CODEC_ID_FLAC,
+     AV_CODEC_ID_MP3ADU,
++    AV_CODEC_ID_FAFR,
+     AV_CODEC_ID_MP3ON4,
+     AV_CODEC_ID_SHORTEN,
+     AV_CODEC_ID_ALAC,
+--- a/libavcodec/codec_desc.c
++++ b/libavcodec/codec_desc.c
+@@ -2769,6 +2769,13 @@
+         .name      = "flac",
+         .long_name = NULL_IF_CONFIG_SMALL("FLAC (Free Lossless Audio Codec)"),
+         .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSLESS,
++    },
++    {
++        .id        = AV_CODEC_ID_FAFR,
++        .type      = AVMEDIA_TYPE_AUDIO,
++        .name      = "fafr",
++        .long_name = NULL_IF_CONFIG_SMALL("FAFR (Framewise Audio Fourier Representation)"),
++        .props     = AV_CODEC_PROP_INTRA_ONLY,
+     },
+     {
+         .id        = AV_CODEC_ID_MP3ADU,
+--- a/libavcodec/Makefile
++++ b/libavcodec/Makefile
+@@ -362,6 +362,7 @@
+ OBJS-$(CONFIG_FFV1_DECODER)            += ffv1dec.o ffv1.o
+ OBJS-$(CONFIG_FFV1_ENCODER)            += ffv1enc.o ffv1.o
+ OBJS-$(CONFIG_FFWAVESYNTH_DECODER)     += ffwavesynth.o
++OBJS-$(CONFIG_FAFR_DECODER)             += fafrdec.o
+ OBJS-$(CONFIG_FIC_DECODER)             += fic.o
+ OBJS-$(CONFIG_FITS_DECODER)            += fitsdec.o fits.o
+ OBJS-$(CONFIG_FITS_ENCODER)            += fitsenc.o
+--- a/libavcodec/allcodecs.c
++++ b/libavcodec/allcodecs.c
+@@ -469,6 +469,7 @@
+ extern const FFCodec ff_ffwavesynth_decoder;
+ extern const FFCodec ff_flac_encoder;
+ extern const FFCodec ff_flac_decoder;
++extern const FFCodec ff_fafr_decoder;
+ extern const FFCodec ff_ftr_decoder;
+ extern const FFCodec ff_g723_1_encoder;
+ extern const FFCodec ff_g723_1_decoder;
+--- a/libavcodec/fafrdec.c
++++ b/libavcodec/fafrdec.c
+@@ -0,0 +1,234 @@
++/*
++ * FAFR decoder
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ */
++
++#include <math.h>
++#include <stdint.h>
++
++#include "libavutil/channel_layout.h"
++#include "libavutil/common.h"
++#include "libavutil/intreadwrite.h"
++#include "libavutil/mem.h"
++#include "libavutil/tx.h"
++
++#include "avcodec.h"
++#include "codec_internal.h"
++#include "decode.h"
++
++#define FAFR_MAGIC 0x52464146u
++#define FAFR_VERSION 1u
++#define FAFR_DTYPE_COMPLEX_F32 1u
++#define FAFR_HEADER_SIZE 40
++
++#define FAFR_PI 3.14159265358979323846
++
++typedef struct FafrContext {
++    int frame_size;
++    int hop_size;
++    int channels;
++    int bins;
++    int64_t total_samples;
++    int64_t samples_left;
++    int frame_bytes;
++
++    AVTXContext *tx;
++    av_tx_fn tx_fn;
++    AVComplexFloat *freq;
++    float *timebuf;
++    float *window;
++    float *win2;
++    float *accum;
++    float *win_accum;
++} FafrContext;
++
++static int fafr_parse_header(FafrContext *s, const uint8_t *data, int size,
++                             int *sample_rate, int *channels)
++{
++    uint32_t magic, version, sample_rate_u, frame_size, hop_size, dtype;
++    uint64_t total_samples, total_frames;
++
++    if (size < FAFR_HEADER_SIZE)
++        return AVERROR_INVALIDDATA;
++
++    magic = AV_RL32(data + 0);
++    version = AV_RL32(data + 4);
++    sample_rate_u = AV_RL32(data + 8);
++    *channels = AV_RL16(data + 12);
++    dtype = AV_RL16(data + 14);
++    frame_size = AV_RL32(data + 16);
++    hop_size = AV_RL32(data + 20);
++    total_samples = AV_RL64(data + 24);
++    total_frames = AV_RL64(data + 32);
++
++    if (magic != FAFR_MAGIC || version != FAFR_VERSION || dtype != FAFR_DTYPE_COMPLEX_F32)
++        return AVERROR_INVALIDDATA;
++    if (frame_size == 0 || hop_size == 0 || hop_size > frame_size || *channels <= 0)
++        return AVERROR_INVALIDDATA;
++
++    s->frame_size = (int)frame_size;
++    s->hop_size = (int)hop_size;
++    s->channels = *channels;
++    s->bins = s->frame_size / 2 + 1;
++    s->total_samples = (int64_t)total_samples;
++    s->samples_left = s->total_samples > 0 ? s->total_samples : INT64_MAX;
++
++    s->frame_bytes = s->bins * s->channels * 2 * (int)sizeof(float);
++
++    (void)total_frames;
++    *sample_rate = (int)sample_rate_u;
++    return 0;
++}
++
++static av_cold int fafr_decode_init(AVCodecContext *avctx)
++{
++    FafrContext *s = avctx->priv_data;
++    int sample_rate = 0;
++    int channels = 0;
++    float scale;
++    int ret;
++    int n;
++
++    if (!avctx->extradata || avctx->extradata_size < FAFR_HEADER_SIZE)
++        return AVERROR_INVALIDDATA;
++
++    ret = fafr_parse_header(s, avctx->extradata, avctx->extradata_size,
++                            &sample_rate, &channels);
++    if (ret < 0)
++        return ret;
++
++    av_channel_layout_default(&avctx->ch_layout, channels);
++    avctx->sample_rate = sample_rate;
++    avctx->sample_fmt = AV_SAMPLE_FMT_FLT;
++    avctx->frame_size = s->hop_size;
++    avctx->block_align = s->frame_bytes;
++
++    s->window = av_malloc_array(s->frame_size, sizeof(float));
++    s->win2 = av_malloc_array(s->frame_size, sizeof(float));
++    s->accum = av_calloc((size_t)s->frame_size * s->channels, sizeof(float));
++    s->win_accum = av_calloc((size_t)s->frame_size * s->channels, sizeof(float));
++    s->timebuf = av_malloc_array(s->frame_size, sizeof(float));
++    s->freq = av_malloc_array(s->bins, sizeof(AVComplexFloat));
++    if (!s->window || !s->win2 || !s->accum || !s->win_accum || !s->timebuf || !s->freq)
++        return AVERROR(ENOMEM);
++
++    for (n = 0; n < s->frame_size; n++) {
++        double w = 0.5 - 0.5 * cos(2.0 * FAFR_PI * n / (s->frame_size - 1));
++        s->window[n] = (float)w;
++        s->win2[n] = (float)(w * w);
++    }
++
++    scale = 1.0f / s->frame_size;
++    ret = av_tx_init(&s->tx, &s->tx_fn, AV_TX_FLOAT_RDFT, 1, s->frame_size, &scale, 0);
++    if (ret < 0)
++        return ret;
++
++    return 0;
++}
++
++static av_cold int fafr_decode_close(AVCodecContext *avctx)
++{
++    FafrContext *s = avctx->priv_data;
++    av_tx_uninit(&s->tx);
++    av_freep(&s->window);
++    av_freep(&s->win2);
++    av_freep(&s->accum);
++    av_freep(&s->win_accum);
++    av_freep(&s->timebuf);
++    av_freep(&s->freq);
++    return 0;
++}
++
++static int fafr_decode_frame(AVCodecContext *avctx, AVFrame *frame,
++                             int *got_frame_ptr, AVPacket *avpkt)
++{
++    FafrContext *s = avctx->priv_data;
++    const uint8_t *buf = avpkt->data;
++    int buf_size = avpkt->size;
++    int out_samples;
++    int ret;
++    int c, n, k;
++
++    if (buf_size < s->frame_bytes)
++        return AVERROR_INVALIDDATA;
++
++    out_samples = (int)FFMIN((int64_t)s->hop_size, s->samples_left);
++    if (out_samples <= 0) {
++        *got_frame_ptr = 0;
++        return buf_size;
++    }
++
++    frame->nb_samples = out_samples;
++    frame->format = avctx->sample_fmt;
++    frame->pts = avpkt->pts;
++
++    if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
++        return ret;
++
++    for (c = 0; c < s->channels; c++) {
++        for (k = 0; k < s->bins; k++) {
++            uint32_t re_i = AV_RL32(buf);
++            uint32_t im_i = AV_RL32(buf + 4);
++            s->freq[k].re = av_int2float(re_i);
++            s->freq[k].im = av_int2float(im_i);
++            buf += 8;
++        }
++
++        s->tx_fn(s->tx, s->timebuf, s->freq, sizeof(AVComplexFloat));
++
++        for (n = 0; n < s->frame_size; n++) {
++            float x = s->timebuf[n] * s->window[n];
++            int idx = n * s->channels + c;
++            s->accum[idx] += x;
++            s->win_accum[idx] += s->win2[n];
++        }
++    }
++
++    {
++        float *out = (float *)frame->data[0];
++        for (n = 0; n < out_samples; n++) {
++            for (c = 0; c < s->channels; c++) {
++                int idx = n * s->channels + c;
++                float denom = s->win_accum[idx];
++                float y = denom > 1e-12f ? (s->accum[idx] / denom) : 0.0f;
++                out[idx] = av_clipf(y, -1.0f, 1.0f);
++            }
++        }
++    }
++
++    if (s->hop_size < s->frame_size) {
++        int shift = s->hop_size * s->channels;
++        int remain = (s->frame_size - s->hop_size) * s->channels;
++        memmove(s->accum, s->accum + shift, (size_t)remain * sizeof(float));
++        memmove(s->win_accum, s->win_accum + shift, (size_t)remain * sizeof(float));
++        memset(s->accum + remain, 0, (size_t)shift * sizeof(float));
++        memset(s->win_accum + remain, 0, (size_t)shift * sizeof(float));
++    } else {
++        memset(s->accum, 0, (size_t)s->frame_size * s->channels * sizeof(float));
++        memset(s->win_accum, 0, (size_t)s->frame_size * s->channels * sizeof(float));
++    }
++
++    s->samples_left -= out_samples;
++    *got_frame_ptr = 1;
++    return s->frame_bytes;
++}
++
++const FFCodec ff_fafr_decoder = {
++    .p.name         = "fafr",
++    CODEC_LONG_NAME("FAFR (Framewise Audio Fourier Representation)"),
++    .p.type         = AVMEDIA_TYPE_AUDIO,
++    .p.id           = AV_CODEC_ID_FAFR,
++    .priv_data_size = sizeof(FafrContext),
++    .init           = fafr_decode_init,
++    .close          = fafr_decode_close,
++    FF_CODEC_DECODE_CB(fafr_decode_frame),
++    .p.capabilities = AV_CODEC_CAP_DR1,
++    .p.sample_fmts  = (const enum AVSampleFormat[]) { AV_SAMPLE_FMT_FLT,
++                                                      AV_SAMPLE_FMT_NONE },
++};
+--- a/libavformat/Makefile
++++ b/libavformat/Makefile
+@@ -204,6 +204,7 @@
+ OBJS-$(CONFIG_EPAF_DEMUXER)              += epafdec.o pcm.o
+ OBJS-$(CONFIG_FFMETADATA_DEMUXER)        += ffmetadec.o
+ OBJS-$(CONFIG_FFMETADATA_MUXER)          += ffmetaenc.o
++OBJS-$(CONFIG_FAFR_DEMUXER)             += fafrdec.o
+ OBJS-$(CONFIG_FIFO_MUXER)                += fifo.o
+ OBJS-$(CONFIG_FILMSTRIP_DEMUXER)         += filmstripdec.o
+ OBJS-$(CONFIG_FILMSTRIP_MUXER)           += filmstripenc.o rawenc.o
+--- a/libavformat/allformats.c
++++ b/libavformat/allformats.c
+@@ -165,6 +165,7 @@
+ extern const FFInputFormat  ff_ffmetadata_demuxer;
+ extern const FFOutputFormat ff_ffmetadata_muxer;
+ extern const FFOutputFormat ff_fifo_muxer;
++extern const FFInputFormat  ff_fafr_demuxer;
+ extern const FFInputFormat  ff_filmstrip_demuxer;
+ extern const FFOutputFormat ff_filmstrip_muxer;
+ extern const FFInputFormat  ff_fits_demuxer;
+--- a/libavformat/fafrdec.c
++++ b/libavformat/fafrdec.c
+@@ -0,0 +1,170 @@
++/*
++ * FAFR demuxer
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ */
++
++#include <stdint.h>
++
++#include "config_components.h"
++#include "libavutil/channel_layout.h"
++#include "libavutil/intreadwrite.h"
++#include "libavutil/mem.h"
++#include "avformat.h"
++#include "demux.h"
++#include "internal.h"
++
++#define FAFR_MAGIC 0x52464146u
++#define FAFR_VERSION 1u
++#define FAFR_DTYPE_COMPLEX_F32 1u
++#define FAFR_HEADER_SIZE 40
++
++typedef struct FafrDemuxContext {
++    int frame_size;
++    int hop_size;
++    int channels;
++    int bins;
++    int frame_bytes;
++    uint64_t total_frames;
++    int64_t total_samples;
++    int64_t data_offset;
++    uint64_t frame_index;
++} FafrDemuxContext;
++
++static int fafr_probe(const AVProbeData *p)
++{
++    if (p->buf_size < 4)
++        return 0;
++    if (AV_RL32(p->buf) == FAFR_MAGIC)
++        return AVPROBE_SCORE_MAX;
++    return 0;
++}
++
++static int fafr_read_header(AVFormatContext *s)
++{
++    FafrDemuxContext *ctx = s->priv_data;
++    AVIOContext *pb = s->pb;
++    AVStream *st;
++    uint8_t hdr[FAFR_HEADER_SIZE];
++    uint32_t magic, version, sample_rate, dtype;
++    uint32_t frame_size, hop_size;
++    uint16_t channels;
++    uint64_t total_frames, total_samples;
++
++    if (avio_read(pb, hdr, FAFR_HEADER_SIZE) < FAFR_HEADER_SIZE)
++        return AVERROR_INVALIDDATA;
++
++    magic = AV_RL32(hdr + 0);
++    version = AV_RL32(hdr + 4);
++    sample_rate = AV_RL32(hdr + 8);
++    channels = AV_RL16(hdr + 12);
++    dtype = AV_RL16(hdr + 14);
++    frame_size = AV_RL32(hdr + 16);
++    hop_size = AV_RL32(hdr + 20);
++    total_samples = AV_RL64(hdr + 24);
++    total_frames = AV_RL64(hdr + 32);
++
++    if (magic != FAFR_MAGIC || version != FAFR_VERSION || dtype != FAFR_DTYPE_COMPLEX_F32)
++        return AVERROR_INVALIDDATA;
++    if (!frame_size || !hop_size || hop_size > frame_size || !channels)
++        return AVERROR_INVALIDDATA;
++
++    ctx->frame_size = (int)frame_size;
++    ctx->hop_size = (int)hop_size;
++    ctx->channels = (int)channels;
++    ctx->bins = ctx->frame_size / 2 + 1;
++    ctx->frame_bytes = ctx->bins * ctx->channels * 2 * (int)sizeof(float);
++    ctx->total_frames = total_frames;
++    ctx->total_samples = (int64_t)total_samples;
++    ctx->data_offset = avio_tell(pb);
++    ctx->frame_index = 0;
++
++    st = avformat_new_stream(s, NULL);
++    if (!st)
++        return AVERROR(ENOMEM);
++
++    st->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
++    st->codecpar->codec_id = AV_CODEC_ID_FAFR;
++    st->codecpar->sample_rate = (int)sample_rate;
++    av_channel_layout_default(&st->codecpar->ch_layout, ctx->channels);
++    st->codecpar->block_align = ctx->frame_bytes;
++
++    st->duration = ctx->total_samples;
++    avpriv_set_pts_info(st, 64, 1, sample_rate);
++
++    st->codecpar->extradata = av_mallocz(FAFR_HEADER_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
++    if (!st->codecpar->extradata)
++        return AVERROR(ENOMEM);
++    memcpy(st->codecpar->extradata, hdr, FAFR_HEADER_SIZE);
++    st->codecpar->extradata_size = FAFR_HEADER_SIZE;
++
++    return 0;
++}
++
++static int fafr_read_packet(AVFormatContext *s, AVPacket *pkt)
++{
++    FafrDemuxContext *ctx = s->priv_data;
++    int ret;
++
++    if (ctx->total_frames && ctx->frame_index >= ctx->total_frames)
++        return AVERROR_EOF;
++
++    ret = av_new_packet(pkt, ctx->frame_bytes);
++    if (ret < 0)
++        return ret;
++
++    ret = avio_read(s->pb, pkt->data, ctx->frame_bytes);
++    if (ret < ctx->frame_bytes) {
++        av_packet_unref(pkt);
++        return AVERROR_EOF;
++    }
++
++    pkt->stream_index = 0;
++    pkt->pts = ctx->frame_index * (int64_t)ctx->hop_size;
++    pkt->duration = ctx->hop_size;
++    ctx->frame_index++;
++    return ctx->frame_bytes;
++}
++
++static int fafr_read_seek(AVFormatContext *s, int stream_index, int64_t timestamp, int flags)
++{
++    FafrDemuxContext *ctx = s->priv_data;
++    int64_t frame;
++    int64_t pos;
++
++    (void)flags;
++    (void)stream_index;
++
++    if (ctx->hop_size <= 0)
++        return AVERROR(EINVAL);
++
++    frame = timestamp / ctx->hop_size;
++    if (frame < 0)
++        frame = 0;
++    if (ctx->total_frames && frame >= (int64_t)ctx->total_frames)
++        frame = (int64_t)ctx->total_frames - 1;
++
++    pos = ctx->data_offset + frame * (int64_t)ctx->frame_bytes;
++    if (avio_seek(s->pb, pos, SEEK_SET) < 0)
++        return AVERROR(EIO);
++
++    ctx->frame_index = frame;
++    return 0;
++}
++
++const FFInputFormat ff_fafr_demuxer = {
++    .p.name         = "fafr",
++    .p.long_name    = NULL_IF_CONFIG_SMALL("FAFR (Framewise Audio Fourier Representation)"),
++    .p.extensions   = "fafr",
++    .p.flags        = AVFMT_GENERIC_INDEX,
++    .priv_data_size = sizeof(FafrDemuxContext),
++    .read_probe     = fafr_probe,
++    .read_header    = fafr_read_header,
++    .read_packet    = fafr_read_packet,
++    .read_seek      = fafr_read_seek,
++};

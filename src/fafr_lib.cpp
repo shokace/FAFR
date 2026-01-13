@@ -4,6 +4,7 @@
 #include <fftw3.h>
 
 #include <cmath>
+#include <cstring>
 #include <memory>
 #include <vector>
 #include <string>
@@ -141,16 +142,48 @@ void fafr_encode_wav_to_fafr(const std::string& in_path,
 
 void fafr_decode_fafr_to_wav(const std::string& in_path,
                              const std::string& out_path) {
-  std::ifstream in(in_path, std::ios::binary);
+  std::ifstream in(in_path, std::ios::binary | std::ios::ate);
   if (!in) throw std::runtime_error("Failed to open input .fafr.");
+  std::streamsize size = in.tellg();
+  if (size <= 0) throw std::runtime_error("Empty input .fafr.");
+  in.seekg(0, std::ios::beg);
 
-  FafrHeader hdr{};
-  in.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
-  if (!in) throw std::runtime_error("Failed to read header.");
-  if (hdr.magic != FAFR_MAGIC) throw std::runtime_error("Not a FAFR file (bad magic).");
-  if (hdr.version != FAFR_VERSION) throw std::runtime_error("Unsupported FAFR version.");
-  if (hdr.dtype != 1) throw std::runtime_error("Unsupported dtype (expected complex float32).");
+  std::vector<uint8_t> bytes(static_cast<size_t>(size));
+  if (!in.read(reinterpret_cast<char*>(bytes.data()), size)) {
+    throw std::runtime_error("Failed to read input .fafr bytes.");
+  }
 
+  FafrDecodedAudio decoded = fafr_decode_fafr_bytes(bytes.data(), bytes.size());
+
+  // Write WAV (float32)
+  SF_INFO outinfo{};
+  outinfo.channels = decoded.channels;
+  outinfo.samplerate = (int)decoded.sample_rate;
+  outinfo.format = SF_FORMAT_WAV | SF_FORMAT_FLOAT;
+
+  SNDFILE* out = sf_open(out_path.c_str(), SFM_WRITE, &outinfo);
+  if (!out) throw std::runtime_error(std::string("sf_open write failed: ") + sf_strerror(nullptr));
+
+  sf_count_t wrote = sf_writef_float(out, decoded.interleaved.data(),
+                                     (sf_count_t)decoded.total_frames);
+  sf_close(out);
+  if (wrote != (sf_count_t)decoded.total_frames) throw std::runtime_error("Failed to write all frames.");
+}
+
+bool fafr_parse_header_bytes(const uint8_t* data, size_t size, FafrHeader* out_hdr) {
+  if (!data || !out_hdr) return false;
+  if (size < sizeof(FafrHeader)) return false;
+  std::memcpy(out_hdr, data, sizeof(FafrHeader));
+  if (out_hdr->magic != FAFR_MAGIC) return false;
+  if (out_hdr->version != FAFR_VERSION) return false;
+  if (out_hdr->dtype != 1) return false;
+  if (out_hdr->channels == 0 || out_hdr->frame_size == 0 || out_hdr->hop_size == 0) return false;
+  return true;
+}
+
+FafrDecodedAudio fafr_decode_fafr_coeffs(const FafrHeader& hdr,
+                                         const uint8_t* coeff_bytes,
+                                         size_t coeff_size) {
   const uint32_t sr = hdr.sample_rate;
   const uint16_t channels = hdr.channels;
   const uint32_t N = hdr.frame_size;
@@ -159,46 +192,53 @@ void fafr_decode_fafr_to_wav(const std::string& in_path,
   const uint64_t num_frames = hdr.total_frames;
   const uint32_t bins = N / 2 + 1;
 
+  uint64_t bins_per_frame = (uint64_t)bins * (uint64_t)channels;
+  uint64_t floats_per_frame = bins_per_frame * 2ULL;
+  uint64_t total_floats = floats_per_frame * num_frames;
+  uint64_t needed = total_floats * sizeof(float);
+  if (coeff_size < needed) throw std::runtime_error("Incomplete FAFR coefficient data.");
+
   auto w = hann_window(N);
 
-  // Output length from hop coverage: last frame start + N
   uint64_t out_len = 0;
   if (num_frames == 0) {
     out_len = total_frames;
   } else {
     uint64_t last_start = (num_frames - 1) * (uint64_t)H;
     out_len = last_start + N;
-    // Trim to original total_frames if you want exact length
     out_len = std::max<uint64_t>(out_len, total_frames);
   }
 
   std::vector<double> out_accum(out_len * channels, 0.0);
   std::vector<double> win_accum(out_len * channels, 0.0);
 
-  // FFTW inverse
   std::unique_ptr<fftw_complex, decltype(&fftw_free)> freqbuf(
       fftw_alloc_complex(bins), &fftw_free);
   if (!freqbuf) throw std::runtime_error("fftw_alloc_complex failed.");
   std::vector<double> timebuf(N);
   fftw_plan iplan = fftw_plan_dft_c2r_1d((int)N, freqbuf.get(), timebuf.data(), FFTW_ESTIMATE);
 
+  size_t offset = 0;
   for (uint64_t f = 0; f < num_frames; f++) {
     uint64_t start = f * (uint64_t)H;
 
     for (uint16_t c = 0; c < channels; c++) {
-      // Read bins
       for (uint32_t k = 0; k < bins; k++) {
-        float re, im;
-        in.read(reinterpret_cast<char*>(&re), sizeof(float));
-        in.read(reinterpret_cast<char*>(&im), sizeof(float));
-        if (!in) throw std::runtime_error("Unexpected EOF in coefficient data.");
+        if (offset + sizeof(float) * 2 > coeff_size) {
+          fftw_destroy_plan(iplan);
+          throw std::runtime_error("Unexpected EOF in coefficient data.");
+        }
+        float re = 0.0f;
+        float im = 0.0f;
+        std::memcpy(&re, coeff_bytes + offset, sizeof(float));
+        std::memcpy(&im, coeff_bytes + offset + sizeof(float), sizeof(float));
+        offset += sizeof(float) * 2;
         freqbuf.get()[k][0] = (double)re;
         freqbuf.get()[k][1] = (double)im;
       }
 
       fftw_execute(iplan);
 
-      // FFTW c2r output is unnormalized: divide by N
       for (uint32_t n = 0; n < N; n++) {
         double x = (timebuf[n] / (double)N) * (double)w[n];
         uint64_t idx = start + n;
@@ -212,28 +252,29 @@ void fafr_decode_fafr_to_wav(const std::string& in_path,
 
   fftw_destroy_plan(iplan);
 
-  // Normalize overlap-add by window power
-  std::vector<float> out_interleaved(total_frames * channels, 0.0f);
+  FafrDecodedAudio decoded{};
+  decoded.sample_rate = sr;
+  decoded.channels = channels;
+  decoded.total_frames = total_frames;
+  decoded.interleaved.assign(total_frames * channels, 0.0f);
   for (uint64_t i = 0; i < total_frames; i++) {
     for (uint16_t c = 0; c < channels; c++) {
       double denom = win_accum[i * channels + c];
       double y = (denom > 1e-12) ? (out_accum[i * channels + c] / denom) : 0.0;
-      // Safety clamp
       y = std::max(-1.0, std::min(1.0, y));
-      out_interleaved[i * channels + c] = (float)y;
+      decoded.interleaved[i * channels + c] = (float)y;
     }
   }
 
-  // Write WAV (float32)
-  SF_INFO outinfo{};
-  outinfo.channels = channels;
-  outinfo.samplerate = (int)sr;
-  outinfo.format = SF_FORMAT_WAV | SF_FORMAT_FLOAT;
+  return decoded;
+}
 
-  SNDFILE* out = sf_open(out_path.c_str(), SFM_WRITE, &outinfo);
-  if (!out) throw std::runtime_error(std::string("sf_open write failed: ") + sf_strerror(nullptr));
-
-  sf_count_t wrote = sf_writef_float(out, out_interleaved.data(), (sf_count_t)total_frames);
-  sf_close(out);
-  if (wrote != (sf_count_t)total_frames) throw std::runtime_error("Failed to write all frames.");
+FafrDecodedAudio fafr_decode_fafr_bytes(const uint8_t* data, size_t size) {
+  FafrHeader hdr{};
+  if (!fafr_parse_header_bytes(data, size, &hdr)) {
+    throw std::runtime_error("Invalid FAFR header.");
+  }
+  const uint8_t* coeffs = data + sizeof(FafrHeader);
+  size_t coeff_size = size - sizeof(FafrHeader);
+  return fafr_decode_fafr_coeffs(hdr, coeffs, coeff_size);
 }
