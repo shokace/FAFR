@@ -8,6 +8,7 @@ This project is intentionally focused on a function-style representation of audi
 
 - **Encode**: `.wav` -> `.fafr` (framewise Fourier coefficients)
 - **Decode**: `.fafr` -> `.wav` (overlap-add reconstruction)
+- **Equation export**: `.wav` -> `.txt` (explicit Fourier-series equation)
 
 ## How it works
 
@@ -61,6 +62,15 @@ Reconstruct a WAV file from a `.fafr` file.
 ```
 ./fafr decode <input.fafr> <output.wav>
 ```
+
+### `equation`
+Export an explicit Fourier-series equation from a WAV file.
+
+```
+./fafr equation <input.wav> <output.txt> [--terms K]
+```
+
+- `--terms K`: number of harmonics in the exported equation (default 32)
 
 ## Notes and constraints
 

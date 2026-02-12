@@ -12,6 +12,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <algorithm>
+#include <iomanip>
 
 static std::vector<float> hann_window(uint32_t N) {
   std::vector<float> w(N);
@@ -168,6 +169,72 @@ void fafr_decode_fafr_to_wav(const std::string& in_path,
                                      (sf_count_t)decoded.total_frames);
   sf_close(out);
   if (wrote != (sf_count_t)decoded.total_frames) throw std::runtime_error("Failed to write all frames.");
+}
+
+void fafr_export_wav_equation(const std::string& in_path,
+                              const std::string& out_path,
+                              const FafrEquationOptions& opt) {
+  SF_INFO info{};
+  SNDFILE* in = sf_open(in_path.c_str(), SFM_READ, &info);
+  if (!in) throw std::runtime_error(std::string("sf_open read failed: ") + sf_strerror(nullptr));
+  if (info.frames <= 0) throw std::runtime_error("Input WAV has no frames.");
+  if (info.channels <= 0) throw std::runtime_error("Invalid channel count.");
+
+  const uint16_t channels = static_cast<uint16_t>(info.channels);
+  const uint32_t sr = static_cast<uint32_t>(info.samplerate);
+  const uint64_t total_frames = static_cast<uint64_t>(info.frames);
+
+  std::vector<float> interleaved(total_frames * channels);
+  sf_count_t got = sf_readf_float(in, interleaved.data(), info.frames);
+  sf_close(in);
+  if (got != info.frames) throw std::runtime_error("Failed to read all samples.");
+
+  std::vector<double> mono(total_frames, 0.0);
+  for (uint64_t i = 0; i < total_frames; i++) {
+    double acc = 0.0;
+    for (uint16_t c = 0; c < channels; c++) {
+      acc += interleaved[i * channels + c];
+    }
+    mono[i] = acc / static_cast<double>(channels);
+  }
+
+  const uint32_t N = static_cast<uint32_t>(total_frames);
+  const uint32_t bins = N / 2 + 1;
+  std::unique_ptr<fftw_complex, decltype(&fftw_free)> freqbuf(
+      fftw_alloc_complex(bins), &fftw_free);
+  if (!freqbuf) throw std::runtime_error("fftw_alloc_complex failed.");
+  fftw_plan plan = fftw_plan_dft_r2c_1d((int)N, mono.data(), freqbuf.get(), FFTW_ESTIMATE);
+  fftw_execute(plan);
+  fftw_destroy_plan(plan);
+
+  uint32_t max_harmonic = (N >= 2) ? (N / 2) : 0;
+  uint32_t K = std::min(opt.max_terms, max_harmonic);
+  if (K == 0) throw std::runtime_error("Not enough samples to build a Fourier equation.");
+
+  const double invN = 1.0 / static_cast<double>(N);
+  const double a0 = 2.0 * freqbuf.get()[0][0] * invN;
+  const double T = static_cast<double>(N) / static_cast<double>(sr);
+
+  std::ofstream out(out_path);
+  if (!out) throw std::runtime_error("Failed to open equation output path.");
+  out << std::setprecision(10);
+  out << "# Fourier-series approximation from WAV\n";
+  out << "# source=" << in_path << "\n";
+  out << "# sample_rate_hz=" << sr << "\n";
+  out << "# channels_mixed=" << channels << "\n";
+  out << "# samples=" << N << "\n";
+  out << "# duration_s=" << T << "\n";
+  out << "# harmonics=" << K << "\n";
+  out << "# domain: 0 <= t < " << T << "\n";
+  out << "f(t) = " << (a0 * 0.5);
+
+  for (uint32_t k = 1; k <= K; k++) {
+    const double ak = 2.0 * freqbuf.get()[k][0] * invN;
+    const double bk = -2.0 * freqbuf.get()[k][1] * invN;
+    out << " + (" << ak << ")*cos(2*pi*" << k << "*t/" << T << ")";
+    out << " + (" << bk << ")*sin(2*pi*" << k << "*t/" << T << ")";
+  }
+  out << "\n";
 }
 
 bool fafr_parse_header_bytes(const uint8_t* data, size_t size, FafrHeader* out_hdr) {

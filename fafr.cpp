@@ -6,12 +6,13 @@
 #include <stdexcept>
 
 struct Args {
-  std::string mode;         // "encode" or "decode"
+  std::string mode;         // "encode", "decode", or "equation"
   std::string in_path;
   std::string out_path;
   uint32_t frame_size = 4096;
   uint32_t hop_size   = 1024;
   float fade_ms = 20.0f;
+  uint32_t terms = 32;
 };
 
 static void usage() {
@@ -19,8 +20,9 @@ static void usage() {
     "Usage:\n"
     "  fafr encode <input.wav> <output.fafr> [--frame N] [--hop H] [--fade-ms M]\n"
     "  fafr decode <input.fafr> <output.wav>\n"
+    "  fafr equation <input.wav> <output.txt> [--terms K]\n"
     "\n"
-    "Defaults: frame=4096 hop=1024 fade-ms=20\n";
+    "Defaults: frame=4096 hop=1024 fade-ms=20 terms=32\n";
 }
 
 static bool starts_with(const std::string& s, const std::string& p) {
@@ -45,6 +47,8 @@ static Args parse_args(int argc, char** argv) {
       a.hop_size = static_cast<uint32_t>(std::stoul(argv[++i]));
     } else if (k == "--fade-ms" && i + 1 < argc) {
       a.fade_ms = std::stof(argv[++i]);
+    } else if (k == "--terms" && i + 1 < argc) {
+      a.terms = static_cast<uint32_t>(std::stoul(argv[++i]));
     } else {
       usage();
       throw std::runtime_error("Unknown arg: " + k);
@@ -56,6 +60,9 @@ static Args parse_args(int argc, char** argv) {
   }
   if (a.hop_size == 0 || a.hop_size > a.frame_size) {
     throw std::runtime_error("--hop must be in (0, frame].");
+  }
+  if (a.terms == 0) {
+    throw std::runtime_error("--terms must be >= 1.");
   }
   return a;
 }
@@ -82,6 +89,17 @@ static void decode_fafr_to_wav(const Args& a) {
             << "  Output: " << a.out_path << "\n";
 }
 
+static void export_wav_equation(const Args& a) {
+  FafrEquationOptions opt{};
+  opt.max_terms = a.terms;
+  fafr_export_wav_equation(a.in_path, a.out_path, opt);
+
+  std::cout << "Equation exported:\n"
+            << "  Input:  " << a.in_path << "\n"
+            << "  Output: " << a.out_path << "\n"
+            << "  Harmonics: " << a.terms << "\n";
+}
+
 int main(int argc, char** argv) {
   try {
     Args a = parse_args(argc, argv);
@@ -90,6 +108,8 @@ int main(int argc, char** argv) {
       encode_wav_to_fafr(a);
     } else if (a.mode == "decode") {
       decode_fafr_to_wav(a);
+    } else if (a.mode == "equation") {
+      export_wav_equation(a);
     } else {
       usage();
       return 2;

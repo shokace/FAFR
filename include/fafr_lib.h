@@ -35,12 +35,20 @@ struct FafrDecodedAudio {
   std::vector<float> interleaved;
 };
 
+struct FafrEquationOptions {
+  uint32_t max_terms = 32;
+};
+
 void fafr_encode_wav_to_fafr(const std::string& in_path,
                              const std::string& out_path,
                              const FafrEncodeOptions& opt);
 
 void fafr_decode_fafr_to_wav(const std::string& in_path,
                              const std::string& out_path);
+
+void fafr_export_wav_equation(const std::string& in_path,
+                              const std::string& out_path,
+                              const FafrEquationOptions& opt);
 
 bool fafr_parse_header_bytes(const uint8_t* data, size_t size, FafrHeader* out_hdr);
 
