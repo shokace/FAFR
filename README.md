@@ -10,6 +10,7 @@ This project is intentionally focused on a function-style representation of audi
 - **Decode**: `.fafr` -> `.wav` (overlap-add reconstruction)
 - **Equation export**: `.wav` -> `.txt` (explicit Fourier-series equation)
 
+
 ## How it works
 
 1. Read interleaved WAV samples using libsndfile.
